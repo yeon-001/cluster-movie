@@ -1,8 +1,11 @@
-import numpy as np
+import math
+
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
 
@@ -58,23 +61,14 @@ def load_data():
     df["누적 관객"] = df["total_audi"]
     df["10위권 일수"] = df["days_in_top10"]
 
-    # 롱런 지수 = 누적 관객 / 첫 주 관객
+    # 롱런 지수
     df["롱런 지수"] = (
         df["total_audi"] / df["first_week_audi"]
     )
 
-    # 롱런 지수가 20을 넘으면 20으로 제한
+    # 20을 넘으면 20으로 제한
     df["롱런 지수"] = df["롱런 지수"].clip(
         upper=20
-    )
-
-    # 스크린 수와 누적 관객은 상용로그 변환
-    df["스크린 수_로그"] = np.log10(
-        df["스크린 수"]
-    )
-
-    df["누적 관객_로그"] = np.log10(
-        df["누적 관객"]
     )
 
     return df
@@ -102,7 +96,7 @@ features = [
 ]
 
 
-# 실제 군집화에 사용하는 열
+# 군집화에 사용할 실제 열
 cluster_columns = {
     "스크린 수": "스크린 수_로그",
     "누적 관객": "누적 관객_로그",
@@ -134,40 +128,58 @@ if len(selected) < 2:
 
 
 # --------------------------------------------------
+# 묶음 수 선택
+# --------------------------------------------------
+
+st.subheader("묶음 수")
+
+n_clusters = st.slider(
+    "묶음 수를 선택하세요.",
+    min_value=2,
+    max_value=7,
+    value=3,
+    step=1,
+)
+
+
+# --------------------------------------------------
 # 데이터 정리
 # --------------------------------------------------
+
+# 스크린 수와 누적 관객은 양수여야
+# 상용로그를 계산할 수 있음
+cluster_df = df[
+    (df["first_week_audi"] > 0)
+    & (df["스크린 수"] > 0)
+    & (df["누적 관객"] > 0)
+].copy()
+
+
+# 롱런 지수와 선택한 속성의 결측값 제거
+cluster_df = cluster_df.dropna(
+    subset=[
+        "롱런 지수",
+        *selected,
+    ]
+).copy()
+
+
+# 상용로그 계산
+cluster_df["스크린 수_로그"] = (
+    cluster_df["스크린 수"]
+    .apply(math.log10)
+)
+
+cluster_df["누적 관객_로그"] = (
+    cluster_df["누적 관객"]
+    .apply(math.log10)
+)
+
 
 selected_columns = [
     cluster_columns[col]
     for col in selected
 ]
-
-
-# 첫 주 관객이 0인 영화 제외
-cluster_df = df[
-    df["first_week_audi"] > 0
-].copy()
-
-
-# 선택한 속성 중 결측값이 있는 영화 제외
-cluster_df = cluster_df.dropna(
-    subset=selected_columns
-)
-
-
-# 로그 변환 대상은 양수여야 함
-cluster_df = cluster_df[
-    (cluster_df["스크린 수"] > 0)
-    & (cluster_df["누적 관객"] > 0)
-].copy()
-
-
-# 무한값 제거
-cluster_df = cluster_df[
-    np.isfinite(
-        cluster_df[selected_columns]
-    ).all(axis=1)
-].copy()
 
 
 # --------------------------------------------------
@@ -181,11 +193,10 @@ st.markdown(
 )
 
 
-if len(cluster_df) < 3:
+if len(cluster_df) < n_clusters:
 
     st.error(
-        "세 묶음으로 나누려면 "
-        "유효한 영화가 최소 3편 필요합니다."
+        "선택한 묶음 수보다 유효한 영화의 수가 적습니다."
     )
 
     st.stop()
@@ -197,8 +208,7 @@ if len(cluster_df) < 3:
 
 X = cluster_df[
     selected_columns
-].values
-
+]
 
 scaler = StandardScaler()
 
@@ -206,15 +216,14 @@ X_scaled = scaler.fit_transform(X)
 
 
 # --------------------------------------------------
-# K-means로 세 묶음
+# 현재 선택한 묶음 수로 K-means
 # --------------------------------------------------
 
 kmeans = KMeans(
-    n_clusters=3,
+    n_clusters=n_clusters,
     random_state=42,
     n_init=10,
 )
-
 
 cluster_df["cluster"] = (
     kmeans.fit_predict(X_scaled)
@@ -222,10 +231,21 @@ cluster_df["cluster"] = (
 
 
 # --------------------------------------------------
-# 누적 관객 평균이 큰 순서로
-# ㉮ ㉯ ㉰ 부여
+# 묶음 표시 기호
 # --------------------------------------------------
 
+cluster_symbols = [
+    "㉮",
+    "㉯",
+    "㉰",
+    "㉱",
+    "㉲",
+    "㉳",
+    "㉴",
+]
+
+
+# 현재 묶음들의 누적 관객 평균 계산
 cluster_order = (
     cluster_df
     .groupby("cluster")["누적 관객"]
@@ -238,12 +258,11 @@ cluster_order = (
 )
 
 
+# 누적 관객 평균이 큰 묶음부터
+# ㉮, ㉯, ㉰ ... 부여
 label_map = {
-    cluster: label
-    for cluster, label in zip(
-        cluster_order,
-        ["㉮", "㉯", "㉰"],
-    )
+    cluster: cluster_symbols[i]
+    for i, cluster in enumerate(cluster_order)
 }
 
 
@@ -253,10 +272,8 @@ cluster_df["묶음"] = (
 )
 
 
-label_order = [
-    "㉮",
-    "㉯",
-    "㉰",
+label_order = cluster_symbols[
+    :n_clusters
 ]
 
 
@@ -390,7 +407,7 @@ else:
     )
 
 
-    # 3차원 점을 작게
+    # 점을 작게
     fig3.update_traces(
         marker=dict(
             size=4
@@ -405,7 +422,7 @@ else:
 
 
 # --------------------------------------------------
-# 묶음별 편 수 + 네 속성 평균
+# 묶음별 요약
 # --------------------------------------------------
 
 st.subheader("묶음별 요약")
@@ -448,7 +465,6 @@ summary.columns = [
 ]
 
 
-# 단위 표시
 st.dataframe(
     summary.style.format(
         {
@@ -497,3 +513,134 @@ for label in label_order:
         st.write(
             f"- {title}"
         )
+
+
+# --------------------------------------------------
+# 묶음 수에 따른 거리 제곱합
+# --------------------------------------------------
+
+st.subheader(
+    "묶음 수에 따른 거리 제곱합"
+)
+
+
+# 1~7개의 묶음에 대해 계산
+inertia_values = []
+
+
+for k in range(1, 8):
+
+    if k > len(cluster_df):
+        inertia_values.append(
+            None
+        )
+        continue
+
+
+    temp_kmeans = KMeans(
+        n_clusters=k,
+        random_state=42,
+        n_init=10,
+    )
+
+
+    temp_kmeans.fit(
+        X_scaled
+    )
+
+
+    # 각 점에서 해당 묶음 중심까지의
+    # 거리 제곱을 모두 더한 값
+    inertia_values.append(
+        temp_kmeans.inertia_
+    )
+
+
+# 꺾은선 그래프
+elbow_df = pd.DataFrame(
+    {
+        "묶음 수": range(1, 8),
+        "거리 제곱합": inertia_values,
+    }
+)
+
+
+fig_elbow = px.line(
+    elbow_df,
+    x="묶음 수",
+    y="거리 제곱합",
+    markers=True,
+    labels={
+        "묶음 수": "묶음 수",
+        "거리 제곱합": "거리 제곱합",
+    },
+)
+
+
+# 현재 선택한 묶음 수 위치에 세로선
+fig_elbow.add_vline(
+    x=n_clusters,
+    line_dash="dash",
+    annotation_text=(
+        f"현재: {n_clusters}개"
+    ),
+    annotation_position="top",
+)
+
+
+st.plotly_chart(
+    fig_elbow,
+    use_container_width=True,
+)
+
+
+# --------------------------------------------------
+# 묶음 수별 거리 제곱합과 감소량
+# --------------------------------------------------
+
+elbow_table = elbow_df.copy()
+
+
+elbow_table["바로 앞 값에서 감소"] = (
+    elbow_table["거리 제곱합"].shift(1)
+    - elbow_table["거리 제곱합"]
+)
+
+
+# 첫 번째 행은 비교할 앞 값이 없으므로 빈칸
+elbow_table.loc[
+    elbow_table.index[0],
+    "바로 앞 값에서 감소"
+] = None
+
+
+st.dataframe(
+    elbow_table.style.format(
+        {
+            "묶음 수": "{:,.0f}",
+            "거리 제곱합": "{:,.2f}",
+            "바로 앞 값에서 감소": "{:,.2f}",
+        },
+        na_rep="",
+    ),
+    use_container_width=True,
+    hide_index=True,
+)
+
+
+# --------------------------------------------------
+# 실루엣 점수
+# --------------------------------------------------
+
+if n_clusters >= 2:
+
+    silhouette = silhouette_score(
+        X_scaled,
+        cluster_df["cluster"],
+    )
+
+    st.markdown(
+        f"**현재 묶음 수 {n_clusters}개의 "
+        f"실루엣 점수: {silhouette:.3f}**"
+        "　(1에 가까울수록 묶음이 뚜렷합니다.)"
+    )
